@@ -7,6 +7,8 @@ from database.payment_gateways import (
     get_gateway_config,
     get_gateway_transaction,
     mark_transaction_fulfillment_retry,
+    defer_cashfree_verification,
+    expire_stale_cashfree_transactions,
     recoverable_gateway_transactions,
     recoverable_failed_notifications,
     reclaim_failed_transaction_notification,
@@ -24,6 +26,11 @@ logger = logging.getLogger(__name__)
 
 
 async def recover_gateway_transactions_job() -> None:
+    # Historical unpaid orders must not stay in the recovery queue forever.
+    expired = await expire_stale_cashfree_transactions(max_age_minutes=30)
+    if expired:
+        logger.info("Expired stale Cashfree transactions count=%s", expired)
+
     items = await recoverable_gateway_transactions(limit=50)
     for tx in items:
         transaction_id = str(tx.get("transaction_id") or "")
@@ -44,13 +51,16 @@ async def recover_gateway_transactions_job() -> None:
                 try:
                     payment_id, verified = await _verify_cashfree_payment(current, settings)
                 except GatewayError as exc:
-                    await update_gateway_transaction(
+                    # Cashfree uses order_status=PAID only after a successful
+                    # payment. Do not hammer the API for unpaid orders: persist
+                    # a per-transaction backoff and retry later.
+                    await defer_cashfree_verification(
                         transaction_id,
-                        status="verification_pending",
-                        verification_error=str(exc)[:500],
+                        str(exc),
+                        retry_after_seconds=120,
                     )
-                    logger.info(
-                        "Cashfree payment still pending transaction_id=%s error=%s",
+                    logger.debug(
+                        "Cashfree payment deferred transaction_id=%s error=%s",
                         transaction_id,
                         exc,
                     )
