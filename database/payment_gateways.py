@@ -53,6 +53,7 @@ async def initialize_payment_gateway_indexes():
     await _transactions().create_index([("gateway", 1), ("gateway_order_id", 1)])
     await _transactions().create_index([("scope", 1), ("owner_id", 1), ("created_at", -1)])
     await _transactions().create_index([("status", 1), ("updated_at", -1)])
+    await _transactions().create_index([("gateway", 1), ("status", 1), ("next_gateway_recovery_at", 1)])
     await _events().create_index([("gateway", 1), ("event_key", 1)], unique=True)
     await _events().create_index("created_at", expireAfterSeconds=30 * 24 * 60 * 60)
     await _transactions().create_index([("status", 1), ("fulfillment_lease_until", 1)])
@@ -454,19 +455,83 @@ async def gateway_history(scope: str, owner_id: int, limit: int = 50) -> list[di
     return await _transactions().find({"scope": scope, "owner_id": int(owner_id)}).sort("created_at", -1).to_list(length=limit)
 
 
+async def expire_stale_cashfree_transactions(max_age_minutes: int = 30) -> int:
+    """Stop abandoned Cashfree orders from being retried forever.
+
+    Cashfree webhooks/return callbacks remain authoritative while an order is
+    active. This only marks very old, still-unpaid local transactions as
+    expired so the recovery worker cannot repeatedly scan historical rows.
+    """
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(minutes=max(1, int(max_age_minutes)))
+    result = await _transactions().update_many(
+        {
+            "gateway": "cashfree",
+            "status": {"$in": ["pending", "verification_pending"]},
+            "fulfilled_at": {"$exists": False},
+            "created_at": {"$lte": cutoff},
+        },
+        {
+            "$set": {
+                "status": "expired",
+                "verification_error": "Cashfree payment was not completed before recovery timeout",
+                "expired_at": now,
+                "updated_at": now,
+            },
+            "$unset": {"next_gateway_recovery_at": ""},
+        },
+    )
+    return int(result.modified_count or 0)
+
+
+async def defer_cashfree_verification(
+    transaction_id: str,
+    reason: str,
+    *,
+    retry_after_seconds: int = 120,
+) -> dict | None:
+    """Persist a backoff so one unpaid order is not queried every job cycle."""
+    now = datetime.now(timezone.utc)
+    retry_after = now + timedelta(seconds=max(30, int(retry_after_seconds)))
+    return await _transactions().find_one_and_update(
+        {
+            "transaction_id": str(transaction_id),
+            "status": {"$in": ["pending", "verification_pending"]},
+        },
+        {
+            "$set": {
+                "status": "verification_pending",
+                "verification_error": str(reason)[:500],
+                "last_gateway_recovery_at": now,
+                "next_gateway_recovery_at": retry_after,
+                "updated_at": now,
+            },
+            "$inc": {"gateway_recovery_attempts": 1},
+        },
+        return_document=ReturnDocument.AFTER,
+    )
+
+
 async def recoverable_gateway_transactions(limit: int = 100) -> list[dict]:
-    """Return paid transactions that can safely be fulfilled or retried."""
+    """Return paid work and due Cashfree verifications without retry storms."""
     now = datetime.now(timezone.utc)
     query = {
         "fulfilled_at": {"$exists": False},
         "$or": [
             {"status": {"$in": ["paid", "paid_unfulfilled"]}},
             {"status": "fulfilling", "fulfillment_lease_until": {"$lte": now}},
-            {"status": "verification_pending", "updated_at": {"$lte": now - timedelta(seconds=30)}},
-            {"gateway": "cashfree", "status": "pending", "updated_at": {"$lte": now - timedelta(seconds=30)}},
+            {
+                "gateway": "cashfree",
+                "status": {"$in": ["pending", "verification_pending"]},
+                "$or": [
+                    {"next_gateway_recovery_at": {"$exists": False}},
+                    {"next_gateway_recovery_at": {"$lte": now}},
+                ],
+            },
         ],
     }
-    return await _transactions().find(query).sort("updated_at", 1).limit(max(1, min(int(limit), 500))).to_list(length=max(1, min(int(limit), 500)))
+    size = max(1, min(int(limit), 500))
+    return await _transactions().find(query).sort("updated_at", 1).limit(size).to_list(length=size)
 
 
 async def gateway_transaction_stats(scope: str, owner_id: int) -> dict:

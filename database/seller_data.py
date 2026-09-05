@@ -956,11 +956,14 @@ async def fulfill_subscription_payment(
 
 async def active_subscriptions(owner_id, limit=5000):
     now=datetime.now(timezone.utc)
-    return await c(SUBS).find({
+    cursor = c(SUBS).find({
         "owner_id":owner_id,
         "active":True,
         "expiry_date":{"$gt":now},
-    }).to_list(length=limit)
+    })
+    if limit is None:
+        return [doc async for doc in cursor]
+    return await cursor.to_list(length=limit)
 
 
 async def expired_subscriptions(owner_id):
