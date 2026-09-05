@@ -24,7 +24,28 @@ class CloneSupportCoreMixin:
             return str(value)
 
     async def support_user_details_text(self,owner,user):
-        record=await get_user(owner,user.id) or {}
+        # Accept either a Telegram User object or a raw Telegram user ID.
+        # Live Support navigation passes the ID from callback_data.
+        if isinstance(user, int):
+            user_id = int(user)
+            record = await get_user(owner, user_id) or {}
+
+            class _SupportUser:
+                id = user_id
+                first_name = record.get("first_name") or ""
+                last_name = record.get("last_name") or ""
+                username = record.get("username")
+                language_code = record.get("language_code")
+
+                @property
+                def full_name(self):
+                    return " ".join(
+                        value for value in (self.first_name, self.last_name) if value
+                    ) or str(self.id)
+
+            user = _SupportUser()
+        else:
+            record=await get_user(owner,user.id) or {}
         sub=await get_subscription(owner,user.id) or {}
         expiry=sub.get("expiry_date")
         if expiry and expiry.tzinfo is None:
@@ -68,6 +89,7 @@ class CloneSupportCoreMixin:
         return InlineKeyboardMarkup([
             [InlineKeyboardButton("👤 Open Telegram Profile",url=f"tg://user?id={int(user_id)}")],
             [InlineKeyboardButton("📋 View User Details",callback_data=f"support_profile_{int(user_id)}")],
+            [InlineKeyboardButton("🎁 Give / Extend Subscription",callback_data=f"support_extend_{int(user_id)}")],
             [InlineKeyboardButton(
                 "✅ Unblock Support" if blocked else "🚫 Block Support",
                 callback_data=(f"support_unblock_{int(user_id)}" if blocked else f"support_block_{int(user_id)}"),
