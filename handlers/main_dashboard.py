@@ -19,6 +19,7 @@ from database.sellers import (
     get_all_sellers,
     get_or_create_seller,
     get_seller,
+    find_seller_by_identifier,
     suspend_seller,
     total_sellers,
     unsuspend_seller,
@@ -764,16 +765,8 @@ async def owner_broadcast_receiver(update: Update, context: ContextTypes.DEFAULT
         raise ApplicationHandlerStop
 
     if context.user_data.get("owner_seller_search"):
-        import re
         raw=(update.effective_message.text or "").strip()
-        seller=None
-        if raw.startswith("@"):
-            seller=await get_database()["sellers"].find_one({"username":{"$regex":f"^{re.escape(raw[1:])}$","$options":"i"}})
-        else:
-            try:
-                seller=await get_seller(int(raw))
-            except ValueError:
-                seller=await get_database()["sellers"].find_one({"username":{"$regex":f"^{re.escape(raw)}$","$options":"i"}})
+        seller=await find_seller_by_identifier(raw)
         if not seller:
             await update.effective_message.reply_text(
                 "❌ Seller not found. Send a valid Seller ID or @username.",
@@ -781,7 +774,15 @@ async def owner_broadcast_receiver(update: Update, context: ContextTypes.DEFAULT
             )
             raise ApplicationHandlerStop
         context.user_data.clear()
-        owner_id = int(seller["owner_id"])
+        owner_id = seller.get("owner_id") or seller.get("user_id") or seller.get("seller_id") or seller.get("telegram_id") or seller.get("telegram_user_id") or seller.get("id")
+        try:
+            owner_id = int(owner_id)
+        except (TypeError, ValueError):
+            await update.effective_message.reply_text(
+                "❌ Seller record was found but its Telegram ID is invalid.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅ Seller Management",callback_data="main_owner_sellers")]]),
+            )
+            raise ApplicationHandlerStop
         text, keyboard = await _seller_owner_details(owner_id)
         await update.effective_message.reply_text(text, reply_markup=keyboard, parse_mode="HTML", disable_web_page_preview=True)
         raise ApplicationHandlerStop
