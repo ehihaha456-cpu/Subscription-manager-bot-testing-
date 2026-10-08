@@ -14,11 +14,20 @@ async def handle(self, update, context, q, owner, staff, a, role):
         timezone_name = await self.seller_timezone(owner)
         seller_account_id = self.seller_account(context)
         plan, assignment = await effective_plan(seller_account_id)
-        usage = await stats(owner)
-        # Clone Bots is seller-level; all other plan resources shown here are
-        # scoped to this clone's persistent data_owner_id.
+        # IMPORTANT: this profile is opened inside one specific clone bot.
+        # `owner` is that clone's persistent data scope.  Only Clone Bots is
+        # seller-account scoped; subscriber/channel/plan usage must never be
+        # aggregated across the seller's other clone bots.
+        clone_scope_id = int(owner)
+        usage = await stats(clone_scope_id)
         clone_bot_count = await count_owner_bots(seller_account_id)
-        usage['active'] = await clone_active_subscriber_count(owner)
+        usage['active'] = await clone_active_subscriber_count(clone_scope_id)
+        usage['channels'] = await get_database()["seller_channels"].count_documents(
+            {"owner_id": clone_scope_id, "active": True}
+        )
+        usage['plans'] = await get_database()["seller_plans"].count_documents(
+            {"owner_id": clone_scope_id}
+        )
         expiry = (assignment or {}).get('expiry_date')
         if expiry and getattr(expiry, 'tzinfo', None) is None:
             expiry = expiry.replace(tzinfo=timezone.utc)
