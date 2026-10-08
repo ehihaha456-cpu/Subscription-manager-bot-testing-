@@ -79,7 +79,7 @@ def seller_dashboard_keyboard(record=None):
     if record:
         active = bool(record.get("active"))
         rows.extend([
-            [InlineKeyboardButton("👤 Seller Profile", callback_data="main_seller_profile")],
+            [InlineKeyboardButton("👤 Profile", callback_data="main_seller_profile")],
             [InlineKeyboardButton("🤖 My Bot", callback_data="seller_my_bot")],
             [
                 InlineKeyboardButton(
@@ -95,7 +95,7 @@ def seller_dashboard_keyboard(record=None):
             [InlineKeyboardButton("📜 Plan History", callback_data="seller_plan_history")],
         ])
     else:
-        rows.append([InlineKeyboardButton("👤 Seller Profile", callback_data="main_seller_profile")])
+        rows.append([InlineKeyboardButton("👤 Profile", callback_data="main_seller_profile")])
         rows.append([
             InlineKeyboardButton("➕ Create / Connect Clone Bot", callback_data="seller_connect")
         ])

@@ -661,12 +661,19 @@ async def selected_seller_profile_text(owner_id: int, record: dict, user) -> str
     joined = _aware_utc((seller or {}).get("created_at"))
     joined_text = joined.strftime("%d-%m-%Y") if joined else "-"
 
-    # Clone Bots is seller-level; the other three resource counts are
-    # strictly scoped to the clone whose profile is currently open.
+    # Clone Bots is seller-level. Everything else is strictly scoped to the
+    # selected clone bot's persistent data_owner_id. Never use seller_account_id
+    # for these three counts, otherwise another clone's data can leak into this
+    # profile.
     bots_used = await count_owner_bots(seller_account_id)
-    active_subscribers = await clone_active_subscriber_count(scope_id)
-    channels_used = await db["seller_channels"].count_documents({"owner_id": scope_id, "active": True})
-    plans_used = await db["seller_plans"].count_documents({"owner_id": scope_id})
+    clone_scope_id = int(scope_id)
+    active_subscribers = await clone_active_subscriber_count(clone_scope_id)
+    channels_used = await db["seller_channels"].count_documents(
+        {"owner_id": clone_scope_id, "active": True}
+    )
+    plans_used = await db["seller_plans"].count_documents(
+        {"owner_id": clone_scope_id}
+    )
     total_users = await db["seller_users"].count_documents({"owner_id": scope_id})
     pending = await db["seller_payments"].count_documents({"owner_id": scope_id, "status": "pending"})
 
