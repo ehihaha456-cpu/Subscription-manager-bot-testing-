@@ -15,7 +15,7 @@ class CloneMenusMixin:
     def admin_menu():
         """Compact clone-bot seller panel. Existing callbacks are preserved."""
         return InlineKeyboardMarkup([
-            [InlineKeyboardButton("👤 Seller Profile", callback_data="a_seller_profile")],
+            [InlineKeyboardButton("👤 Profile", callback_data="a_seller_profile")],
             [InlineKeyboardButton("📦 Manage Plans", callback_data="a_plans"), InlineKeyboardButton("💳 Payment Settings", callback_data="a_payment")],
             [InlineKeyboardButton("📨 Pending Payments", callback_data="a_pending"), InlineKeyboardButton("📜 Payment History", callback_data="a_history")],
             [InlineKeyboardButton("📢 Channels / Groups", callback_data="a_channels"), InlineKeyboardButton("⚙️ Bot Settings", callback_data="a_settings")],
