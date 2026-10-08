@@ -5,6 +5,58 @@ from database.business_delivery import list_business_contact_routes, log_busines
 
 
 class ClonePaymentDeliveryMixin:
+    async def notify_subscriber_limit(self, owner_id: int, user_id: int, plan_name: str, amount) -> dict:
+        """Tell the buyer and seller that the seller's subscriber limit is full."""
+        owner_id = int(owner_id)
+        user_id = int(user_id)
+        running = self.get_running(owner_id)
+        if not running:
+            record = await get_bot_by_data_owner_id(owner_id)
+            started = await self.start_bot(int(record["bot_id"])) if record else False
+            running = self.get_running(owner_id) if started else None
+        if not running:
+            return {"sent": 0, "error": "Clone bot is not running"}
+
+        seller_account_id = int(running.application.bot_data.get("seller_account_id", owner_id))
+        status = await seller_subscriber_limit_status(seller_account_id, user_id)
+        count = int(status.get("count", 0))
+        limit = int(status.get("limit", 0))
+        pct = 100 if limit == 0 else int((count / limit) * 100) if limit > 0 else 0
+        pct = min(100, max(0, pct))
+        plan_name = html.escape(str(plan_name or "Subscription"))
+        amount_text = str(amount if amount is not None else "-")
+        main_username = str(MAIN_BOT_USERNAME or "").lstrip("@").strip()
+        buy_url = f"https://t.me/{main_username}?start=sellerplan" if main_username else "https://t.me/"
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("💳 Buy / Change Plan", url=buy_url),
+             InlineKeyboardButton("👤 Profile", callback_data="a_seller_profile")]
+        ])
+        seller_text = (
+            f"🚨 New user is trying to purchase your plan\n\n"
+            f"📦 Plan: {plan_name}\n"
+            f"💰 Price: {amount_text}\n\n"
+            f"⚠️ Warning: Your subscribers are at {count} / {limit} ({pct}%)\n"
+            f"Please renew your seller plan."
+        )
+        buyer_text = (
+            "⚠️ Subscriber is limited\n\n"
+            "This seller has reached the maximum active subscriber limit. "
+            "Please try again later."
+        )
+        bot = running.application.bot
+        sent = 0
+        try:
+            await bot.send_message(user_id, buyer_text)
+            sent += 1
+        except Exception:
+            logger.debug("Could not notify limited subscriber user=%s", user_id, exc_info=True)
+        try:
+            await bot.send_message(seller_account_id, seller_text, reply_markup=keyboard)
+            sent += 1
+        except Exception:
+            logger.exception("Could not notify seller subscriber limit owner=%s", seller_account_id)
+        return {"sent": sent, "count": count, "limit": limit}
+
     async def stars_precheckout(self, update, context):
         query = update.pre_checkout_query
         try:
@@ -18,6 +70,11 @@ class ClonePaymentDeliveryMixin:
             expected = int((plan or {}).get('stars_price', 0) or 0)
             if not cfg.get('stars_enabled') or not plan or expected <= 0 or query.currency != 'XTR' or query.total_amount != expected:
                 raise ValueError('plan changed')
+            limit_status = await seller_subscriber_limit_status(owner, user_id)
+            if limit_status.get('at_limit') and not limit_status.get('already_active'):
+                await self.notify_subscriber_limit(owner, user_id, plan.get('name'), plan.get('stars_price') or expected)
+                await query.answer(ok=False, error_message='Subscriber is limited. Please try again later.')
+                return
             await query.answer(ok=True)
         except Exception:
             await query.answer(ok=False, error_message='This Stars invoice is no longer valid. Reopen the payment page.')
@@ -37,21 +94,38 @@ class ClonePaymentDeliveryMixin:
             if not plan or expected <= 0 or payment.total_amount != expected:
                 raise ValueError('price mismatch')
             reference = payment.telegram_payment_charge_id
-            previous = await get_subscription(owner, user_id)
+            group_id = str(plan.get('group_id') or '').strip()
+            target_ids = [int(x) for x in (plan.get('target_chat_ids') or [])]
             now = datetime.now(timezone.utc)
-            previous_expiry = (previous or {}).get('expiry_date')
-            if previous_expiry and previous_expiry.tzinfo is None:
-                previous_expiry = previous_expiry.replace(tzinfo=timezone.utc)
-            was_active = bool(previous and previous.get('active') and previous_expiry and previous_expiry > now)
-            await create_automatic_payment(owner, user_id, plan, 'telegram_stars', reference, reference)
-            result = await fulfill_subscription_payment(
-                owner,
-                user_id,
-                f'stars:{reference}',
-                plan['name'],
-                plan['duration_minutes'],
-                amount=0,
-                duration_text=plan['duration_text'],
+            if group_id:
+                previous = await get_plan_group_subscription(owner, user_id, group_id)
+                previous_expiry = (previous or {}).get('expiry_date')
+                if previous_expiry and previous_expiry.tzinfo is None:
+                    previous_expiry = previous_expiry.replace(tzinfo=timezone.utc)
+                was_active = bool(previous and previous.get('active') and previous_expiry and previous_expiry > now)
+            else:
+                previous = await get_subscription(owner, user_id)
+                previous_expiry = (previous or {}).get('expiry_date')
+                if previous_expiry and previous_expiry.tzinfo is None:
+                    previous_expiry = previous_expiry.replace(tzinfo=timezone.utc)
+                was_active = bool(previous and previous.get('active') and previous_expiry and previous_expiry > now)
+            await create_automatic_payment(owner, user_id, plan, 'telegram_stars', reference, reference, stars_amount=payment.total_amount)
+            if group_id:
+                result = await fulfill_plan_group_subscription(
+                    owner, user_id, f'stars:{reference}', group_id,
+                    plan['name'], plan['duration_minutes'], amount=0,
+                    duration_text=plan['duration_text'], target_chat_ids=target_ids,
+                )
+            else:
+                result = await fulfill_subscription_payment(
+                    owner, user_id, f'stars:{reference}', plan['name'],
+                    plan['duration_minutes'], amount=0,
+                    duration_text=plan['duration_text'],
+                )
+            await record_payment_subscription_snapshot(
+                owner, reference,
+                (result.get('subscription') or {}).get('start_date') or now,
+                result.get('expiry_date'),
             )
             details = {
                 'plan_name': plan['name'],
@@ -62,6 +136,7 @@ class ClonePaymentDeliveryMixin:
                 'payment_date': now,
                 'expiry_date': result.get('expiry_date'),
                 'duration': plan['duration_text'],
+                'target_chat_ids': [int(x) for x in (plan.get('target_chat_ids') or [])],
                 'was_already_active': was_active,
                 'previous_expiry': previous_expiry,
             }
@@ -112,6 +187,17 @@ class ClonePaymentDeliveryMixin:
         gateway = str(details.get("gateway") or "-").title()
         amount_line = f"• Amount: ⭐{stars_amount}\n" if stars_amount else f"• Amount: {format_currency(currency, amount)}\n"
 
+        target_line = ""
+        if details.get("group_id"):
+            target_ids = {int(x) for x in (details.get("target_chat_ids") or [])}
+            target_chats = await get_channels(owner_id)
+            if target_ids:
+                target_chats = [ch for ch in target_chats if int(ch.get("chat_id", 0)) in target_ids]
+            target_line = "🎯 <b>Target Group/Channel</b>\n" + "\n".join(
+                f"• {html.escape(str(ch.get('title') or ch.get('chat_id') or 'Group/Channel'))}"
+                for ch in target_chats
+            ) + "\n\n" if target_chats else f"🎯 <b>Target Group/Channel:</b> {html.escape(str(details.get('group_id')))}\n\n"
+
         text = (
             "💰 <b>Automatic Payment Successful</b>\n\n"
             "A subscriber payment has been verified automatically.\n\n"
@@ -127,6 +213,7 @@ class ClonePaymentDeliveryMixin:
             f"• Payment Gateway: {html.escape(gateway)}\n"
             f"• Payment Date: {_format_dt(details.get('payment_date'))}\n"
             f"• Expiry Date: {_format_dt(details.get('expiry_date'))}\n\n"
+            f"{target_line}"
             "🧾 <b>Payment Details</b>\n"
             f"• Transaction ID: <code>{html.escape(str(details.get('transaction_id') or '-'))}</code>\n"
             f"• Invoice: <code>{html.escape(str(details.get('invoice_no') or '-'))}</code>\n"
@@ -281,21 +368,47 @@ class ClonePaymentDeliveryMixin:
         bot=running.application.bot
         timezone_name = await self.seller_timezone(int(owner_id))
         connected_channels=await get_channels(int(owner_id))
+        target_ids = set()
+        if success_details and success_details.get("target_chat_ids"):
+            try:
+                target_ids = {int(x) for x in success_details.get("target_chat_ids") or []}
+            except (TypeError, ValueError):
+                target_ids = set()
+        if target_ids:
+            connected_channels = [ch for ch in connected_channels if int(ch.get("chat_id", 0)) in target_ids]
         if not connected_channels:
             return {"sent":0,"already_member":0,"failed":0,"error":"No channel/group is connected to this clone bot"}
 
-        # Existing channel documents default to enabled so current sellers keep
-        # their previous behaviour until they explicitly disable a destination.
-        channels=[
-            channel for channel in connected_channels
-            if channel.get("auto_invite_enabled",True) is not False
-        ]
+        # Automatic invite delivery is controlled only by the clone bot's
+        # current Telegram permission. There is no stored enable/disable
+        # switch anymore. A chat is eligible only when the clone bot is an
+        # administrator/creator and has Invite Users permission.
+        me = await bot.get_me()
+        channels=[]
+        for channel in connected_channels:
+            chat_id=int(channel["chat_id"])
+            try:
+                bot_member = await bot.get_chat_member(chat_id, int(me.id))
+                bot_status = getattr(bot_member, "status", "")
+                can_invite = bool(getattr(bot_member, "can_invite_users", False))
+                if bot_status == "creator" or (bot_status == "administrator" and can_invite):
+                    channels.append(channel)
+                else:
+                    logger.warning(
+                        "Invite delivery skipped: missing Telegram invite permission owner=%s chat=%s status=%s can_invite=%s",
+                        owner_id, chat_id, bot_status, can_invite,
+                    )
+            except TelegramError as exc:
+                logger.warning(
+                    "Invite permission check failed owner=%s chat=%s: %s",
+                    owner_id, chat_id, exc,
+                )
         if not channels:
             return {
                 "sent":0,
                 "already_member":0,
                 "failed":0,
-                "error":"Automatic invite delivery is disabled for every connected channel/group",
+                "error":"No connected channel/group has the required Telegram invite permission",
             }
 
         links=[]
@@ -372,6 +485,12 @@ class ClonePaymentDeliveryMixin:
                         if success_details.get('stars_amount')
                         else f"💰 Amount: {format_currency((await get_seller_settings(owner_id)).get('currency'), float(success_details.get('amount') or 0))}\n"
                     )
+                    target_line = ""
+                    if success_details.get("group_id"):
+                        target_line = "🎯 Target Group/Channel:\n" + "\n".join(
+                            f"• {ch.get('title') or ch.get('chat_id') or 'Group/Channel'}"
+                            for ch in connected_channels
+                        ) + "\n\n"
                     text = (
                         "✅ Payment verified automatically\n"
                         "━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -384,6 +503,7 @@ class ClonePaymentDeliveryMixin:
                         f"📅 Payment Date: {_format_dt(success_details.get('payment_date'))}\n"
                         f"⌛ Added Duration: {success_details.get('duration') or '-'}\n"
                         "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                        f"{target_line}"
                         f"{subscription_note}\n\n"
                         "Join using your private invite link(s):\n\n"
                         + "\n\n".join(links)
