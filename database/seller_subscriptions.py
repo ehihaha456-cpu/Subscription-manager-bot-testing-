@@ -268,8 +268,7 @@ async def plan_limit_warning(owner_id: int):
         f"⚠️ {name} Plan Limit Reached\n\n"
         f"Your {name} plan supports:\n\n"
         f"• {_limit_text(plan.get('bot_limit', 1))} Clone Bot"
-        f"{'s' if int(plan.get('bot_limit', 1) or 0) != 1 else ''}\n\n"
-        "For Each Clone Bot:\n"
+        f"{'s' if int(plan.get('bot_limit', 1) or 0) != 1 else ''}\n"
         f"• {_limit_text(plan.get('active_subscriber_limit', 25))} Active Subscribers\n"
         f"• {_limit_text(plan.get('channel_limit', 1))} Channel/Group"
         f"{'s' if int(plan.get('channel_limit', 1) or 0) != 1 else ''}\n"
@@ -278,34 +277,20 @@ async def plan_limit_warning(owner_id: int):
     )
 
 
-async def _active_subscriber_ids_for_scope(scope_owner_id: int):
-    """Return unique active subscriber IDs for one clone bot data scope."""
-    scope_owner_id = int(scope_owner_id)
-    now = datetime.now(timezone.utc)
-    db = get_database()
-    normal_ids, group_ids = await asyncio.gather(
-        db["seller_subscriptions"].distinct(
-            "user_id", {"owner_id": scope_owner_id, "active": True, "expiry_date": {"$gt": now}}
-        ),
-        db["seller_plan_group_subscriptions"].distinct(
-            "user_id", {"owner_id": scope_owner_id, "active": True, "expiry_date": {"$gt": now}}
-        ),
-    )
-    user_ids = set()
-    for value in [*(normal_ids or []), *(group_ids or [])]:
-        try:
-            user_id = int(value)
-        except (TypeError, ValueError):
-            continue
-        if user_id:
-            user_ids.add(user_id)
-    return user_ids
-
-
 async def seller_active_subscriber_ids(owner_id: int):
-    """Return unique active subscriber IDs across all clone bots of a seller."""
+    """Return unique active subscriber IDs across every clone-data scope.
+
+    Seller limits are seller-account scoped, while subscriber documents are
+    stored under each clone bot's ``data_owner_id``.  Plan Group subscriptions
+    are stored separately from normal subscriptions, so both collections must
+    be included.  A user subscribed to multiple groups/bots is counted once.
+    """
     owner_id = int(owner_id)
+    now = datetime.now(timezone.utc)
+
+    from database.mongo import get_database
     from database.seller_bots import get_bots
+
     bot_records = await get_bots(owner_id)
     scopes = {owner_id}
     for record in bot_records or []:
@@ -317,29 +302,97 @@ async def seller_active_subscriber_ids(owner_id: int):
                 scopes.add(int(scope))
         except (TypeError, ValueError):
             continue
-    scoped_ids = await asyncio.gather(
-        *(_active_subscriber_ids_for_scope(scope) for scope in sorted(scopes))
+
+    db = get_database()
+    scope_list = sorted(scopes)
+
+    normal_ids, group_ids = await asyncio.gather(
+        db["seller_subscriptions"].distinct(
+            "user_id",
+            {
+                "owner_id": {"$in": scope_list},
+                "active": True,
+                "expiry_date": {"$gt": now},
+            },
+        ),
+        db["seller_plan_group_subscriptions"].distinct(
+            "user_id",
+            {
+                "owner_id": {"$in": scope_list},
+                "active": True,
+                "expiry_date": {"$gt": now},
+            },
+        ),
     )
+
     user_ids = set()
-    for ids in scoped_ids:
-        user_ids.update(ids)
+    for value in [*(normal_ids or []), *(group_ids or [])]:
+        try:
+            user_id = int(value)
+        except (TypeError, ValueError):
+            continue
+        if user_id:
+            user_ids.add(user_id)
     return user_ids
 
 
-async def seller_subscriber_limit_status(owner_id: int, user_id: int, scope_owner_id: int | None = None) -> dict:
-    """Return Active Subscriber usage for a seller's clone bot.
+async def clone_active_subscriber_ids(owner_id: int):
+    """Return active subscriber IDs for exactly one clone data scope.
 
-    owner_id resolves the seller plan. scope_owner_id identifies the clone bot
-    whose subscribers consume that per-bot limit.
+    Unlike seller_active_subscriber_ids(), this function never expands the
+    scope to the seller's other clone bots. It is intended for clone-specific
+    profile/usage displays and future per-clone limit checks.
+    """
+    owner_id = int(owner_id)
+    now = datetime.now(timezone.utc)
+    db = get_database()
+
+    normal_ids, group_ids = await asyncio.gather(
+        db["seller_subscriptions"].distinct(
+            "user_id",
+            {
+                "owner_id": owner_id,
+                "active": True,
+                "expiry_date": {"$gt": now},
+            },
+        ),
+        db["seller_plan_group_subscriptions"].distinct(
+            "user_id",
+            {
+                "owner_id": owner_id,
+                "active": True,
+                "expiry_date": {"$gt": now},
+            },
+        ),
+    )
+
+    user_ids = set()
+    for value in [*(normal_ids or []), *(group_ids or [])]:
+        try:
+            user_id = int(value)
+        except (TypeError, ValueError):
+            continue
+        if user_id:
+            user_ids.add(user_id)
+    return user_ids
+
+
+async def clone_active_subscriber_count(owner_id: int) -> int:
+    """Return active subscribers belonging only to one clone data scope."""
+    return len(await clone_active_subscriber_ids(owner_id))
+
+
+async def seller_subscriber_limit_status(owner_id: int, user_id: int) -> dict:
+    """Return seller-wide active subscriber usage for one prospective user.
+
+    Both normal and Plan Group subscriptions are included through
+    ``seller_active_subscriber_ids``. A user already active anywhere under
+    the seller does not consume another slot when purchasing/extending a plan.
     """
     owner_id = int(owner_id)
     user_id = int(user_id)
     plan, _ = await effective_plan(owner_id)
-    active_ids = (
-        await seller_active_subscriber_ids(owner_id)
-        if scope_owner_id is None
-        else await _active_subscriber_ids_for_scope(int(scope_owner_id))
-    )
+    active_ids = await seller_active_subscriber_ids(owner_id)
     limit = int(plan.get("active_subscriber_limit", 25))
     return {
         "count": len(active_ids),
@@ -413,70 +466,47 @@ def _seller_plan_status(assignment: dict | None) -> str:
 
 
 async def current_plan_text(owner_id: int):
-    """Render seller plan limits and usage independently for every clone bot."""
-    from database.seller_bots import get_bots
-    from database.seller_data import get_channels, get_plans
-
-    owner_id = int(owner_id)
     plan, assignment = await effective_plan(owner_id)
-    bots = await get_bots(owner_id)
+    usage = await seller_usage(owner_id)
+
+    def row(label, used, key):
+        return f"{label}: {used:,} / {_limit_text(plan.get(key, 0))}"
 
     expiry = assignment.get("expiry_date") if assignment else None
     if expiry and expiry.tzinfo is None:
         expiry = expiry.replace(tzinfo=timezone.utc)
-    expiry_text = expiry.astimezone(timezone.utc).strftime("%d %b %Y, %I:%M %p UTC") if expiry else "No Expiry"
+
+    expiry_text = (
+        expiry.astimezone(timezone.utc).strftime("%d %b %Y, %I:%M %p UTC")
+        if expiry
+        else "No Expiry"
+    )
     remaining_text = _remaining_duration_text(expiry)
     plan_status = _seller_plan_status(assignment)
 
-    bot_limit = int(plan.get("bot_limit", 1))
-    any_resource_limit_reached = bot_limit >= 0 and len(bots) >= bot_limit
-    usage_sections = []
-    for record in bots:
-        scope = int(record.get("data_owner_id") or record.get("owner_id") or owner_id)
-        bot_name = str(record.get("bot_name") or "").strip()
-        username = str(record.get("bot_username") or "").strip().lstrip("@")
-        display_name = bot_name or (f"@{username}" if username else f"Bot {record.get('bot_id', '')}")
-        active_ids, channels, plans = await asyncio.gather(
-            _active_subscriber_ids_for_scope(scope),
-            get_channels(scope),
-            get_plans(scope),
-        )
-        active_count = len(active_ids)
-        channel_count = len(channels)
-        plan_count = len(plans)
-        sub_limit = int(plan.get("active_subscriber_limit", 25))
-        channel_limit = int(plan.get("channel_limit", 1))
-        plan_limit = int(plan.get("plan_limit", 2))
-        if any(limit >= 0 and used >= limit for used, limit in (
-            (active_count, sub_limit), (channel_count, channel_limit), (plan_count, plan_limit)
-        )):
-            any_resource_limit_reached = True
-        usage_sections.append(
-            f"🤖 {display_name}\n"
-            f"👥 Active Subscribers: {active_count:,} / {_limit_text(sub_limit)}\n"
-            f"📢 Channels/Groups: {channel_count:,} / {_limit_text(channel_limit)}\n"
-            f"📦 Subscription Plans: {plan_count:,} / {_limit_text(plan_limit)}"
-        )
+    limit_status = "✅ Within plan limits"
+    checks = [
+        (usage['bot_count'], plan.get('bot_limit', 1)),
+        (usage['active_subscriber_count'], plan.get('active_subscriber_limit', 25)),
+        (usage['channel_count'], plan.get('channel_limit', 1)),
+        (usage['plan_count'], plan.get('plan_limit', 2)),
+    ]
+    if any(int(limit) >= 0 and used >= int(limit) for used, limit in checks):
+        limit_status = "⚠️ One or more plan limits reached"
 
-    current_usage = "\n\n".join(usage_sections) if usage_sections else "No clone bots connected yet."
-    limit_status = "⚠️ One or more plan limits reached" if any_resource_limit_reached else "✅ Within plan limits"
     return (
         "📊 Current Seller Plan\n\n"
         f"🏷 Plan: {plan.get('name', 'Free')}\n"
         f"📌 Status: {plan_status}\n"
         f"⏳ Remaining Duration: {remaining_text}\n"
         f"📅 Expiry Date: {expiry_text}\n\n"
-        "📊 Plan Limitations\n\n"
-        f"🤖 Clone Bots: {len(bots):,} / {_limit_text(bot_limit)}\n\n"
-        "For Each Clone Bot:\n"
-        f"👥 Active Subscribers: {_limit_text(plan.get('active_subscriber_limit', 25))}\n"
-        f"📢 Channels/Groups: {_limit_text(plan.get('channel_limit', 1))}\n"
-        f"📦 Subscription Plans: {_limit_text(plan.get('plan_limit', 2))}\n\n"
-        "📊 Current Usage\n\n"
-        f"{current_usage}\n\n"
+        "Usage\n\n"
+        f"{row('🤖 Clone Bots', usage['bot_count'], 'bot_limit')}\n"
+        f"{row('👥 Active Subscribers', usage['active_subscriber_count'], 'active_subscriber_limit')}\n"
+        f"{row('📢 Channels/Groups', usage['channel_count'], 'channel_limit')}\n"
+        f"{row('📦 Subscription Plans', usage['plan_count'], 'plan_limit')}\n\n"
         f"Status: {limit_status}"
     )
-
 
 PAYMENTS = "seller_plan_payments"
 HISTORY = "seller_plan_history"
