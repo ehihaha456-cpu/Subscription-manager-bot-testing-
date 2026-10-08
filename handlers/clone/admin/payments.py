@@ -224,7 +224,7 @@ async def handle(self, update, context, q, owner, staff, a, role):
             return True
         try:
             seller_account_id = self.seller_account(context)
-            limit_status = await seller_subscriber_limit_status(seller_account_id, int(p['user_id']))
+            limit_status = await seller_subscriber_limit_status(seller_account_id, int(p['user_id']), scope_owner_id=owner)
             if limit_status.get('at_limit') and not limit_status.get('already_active'):
                 await release_processing_payment(owner, pid, 'seller subscriber limit reached')
                 await q.answer('Subscriber limit reached', show_alert=True)
