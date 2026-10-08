@@ -18,7 +18,7 @@ class ClonePaymentDeliveryMixin:
             return {"sent": 0, "error": "Clone bot is not running"}
 
         seller_account_id = int(running.application.bot_data.get("seller_account_id", owner_id))
-        status = await seller_subscriber_limit_status(seller_account_id, user_id)
+        status = await seller_subscriber_limit_status(seller_account_id, user_id, scope_owner_id=owner_id)
         count = int(status.get("count", 0))
         limit = int(status.get("limit", 0))
         pct = 100 if limit == 0 else int((count / limit) * 100) if limit > 0 else 0
@@ -70,7 +70,8 @@ class ClonePaymentDeliveryMixin:
             expected = int((plan or {}).get('stars_price', 0) or 0)
             if not cfg.get('stars_enabled') or not plan or expected <= 0 or query.currency != 'XTR' or query.total_amount != expected:
                 raise ValueError('plan changed')
-            limit_status = await seller_subscriber_limit_status(owner, user_id)
+            seller_account_id = int(context.application.bot_data.get("seller_account_id") or owner)
+            limit_status = await seller_subscriber_limit_status(seller_account_id, user_id, scope_owner_id=owner)
             if limit_status.get('at_limit') and not limit_status.get('already_active'):
                 await self.notify_subscriber_limit(owner, user_id, plan.get('name'), plan.get('stars_price') or expected)
                 await query.answer(ok=False, error_message='Subscriber is limited. Please try again later.')
@@ -109,6 +110,12 @@ class ClonePaymentDeliveryMixin:
                 if previous_expiry and previous_expiry.tzinfo is None:
                     previous_expiry = previous_expiry.replace(tzinfo=timezone.utc)
                 was_active = bool(previous and previous.get('active') and previous_expiry and previous_expiry > now)
+            seller_account_id = self.seller_account(context)
+            limit_status = await seller_subscriber_limit_status(seller_account_id, user_id, scope_owner_id=owner)
+            if limit_status.get('at_limit') and not limit_status.get('already_active'):
+                await self.notify_subscriber_limit(owner, user_id, plan.get('name'), plan.get('stars_price') or expected)
+                await update.effective_message.reply_text('⚠️ Subscriber limit reached. Payment was received but this subscription could not be activated. Please contact the seller.')
+                return
             await create_automatic_payment(owner, user_id, plan, 'telegram_stars', reference, reference, stars_amount=payment.total_amount)
             if group_id:
                 result = await fulfill_plan_group_subscription(
