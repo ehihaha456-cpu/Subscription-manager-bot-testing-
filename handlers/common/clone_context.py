@@ -16,6 +16,7 @@ from telegram.ext import Application, ApplicationHandlerStop, CallbackQueryHandl
 from database.seller_subscriptions import (
     effective_plan, plan_limit_warning, current_plan_text, get_config,
     seller_access_state, usage_warning, bot_runtime_allowed,
+    seller_active_subscriber_count, seller_active_subscriber_ids, seller_subscriber_limit_status,
 )
 from database.payment_gateways import (
     SUPPORTED_GATEWAYS, create_gateway_transaction, get_gateway_config,
@@ -70,7 +71,8 @@ from database.platform_features import (
     update_scheduled_campaign, delete_scheduled_campaign,
 )
 from database.seller_data import (
-    activate_subscription, fulfill_subscription_payment, active_subscriptions, add_channel, create_payment, create_automatic_payment, create_plan, delete_plan,
+    activate_subscription, fulfill_subscription_payment, fulfill_plan_group_subscription, get_plan_group_subscription, active_plan_group_subscriptions_for_chat, active_subscriptions, active_expiry_reminder_subscriptions,
+    claim_expiry_reminder, complete_expiry_reminder, release_expiry_reminder, add_channel, create_payment, create_automatic_payment, create_plan, delete_plan, create_plan_group, update_plan_group, get_plan_group, get_plan_groups, delete_plan_group,
     ensure_seller_defaults, expired_subscriptions, get_channels, get_payment,
     set_channel_auto_invite,
     get_plan, get_plans, get_seller_settings, get_subscription, get_user, mark_expired,
@@ -81,7 +83,8 @@ from database.seller_data import (
     register_referral, count_all_referrals, count_successful_referrals,
     mark_referral_rewarded, finalize_referral_reward,
     release_referral_reward, get_user_by_username, set_user_ban,
-    remove_subscription,
+    remove_subscription, remove_plan_group_subscriptions, remove_plan_group_subscription, get_user_plan_group_subscriptions,
+    add_payment_notification_messages, get_payment_notification_messages, record_payment_subscription_snapshot,
 )
 
 logger=logging.getLogger(__name__)
@@ -165,19 +168,25 @@ def _seller_razorpay_webhook_url(owner_id: int) -> str:
 
 
 def _seller_razorpay_text(g: dict) -> str:
+    mode = str(g.get("checkout_mode") or "upi_qr").lower()
+    mode_text = "UPI QR (30 minutes)" if mode == "upi_qr" else "Payment Link"
     return (
         "💳 Razorpay\n\n"
         f"Status: {'Enabled ✅' if g.get('enabled') else 'Disabled ❌'}\n"
         f"Key ID: {'Added' if g.get('key_id') else 'Not added'}\n"
         f"Key Secret: {'Added' if g.get('key_secret') else 'Not added'}\n"
+        f"Payment Mode: {mode_text}\n"
         f"Webhook URL: {'Generated ✅' if PUBLIC_BASE_URL else 'Not available ❌'}\n"
         f"Webhook Secret: {'Added ✅' if g.get('webhook_secret') else 'Not added ❌'}"
     )
 
 
-def _seller_razorpay_keyboard(enabled: bool) -> InlineKeyboardMarkup:
+def _seller_razorpay_keyboard(enabled: bool, checkout_mode: str = "upi_qr") -> InlineKeyboardMarkup:
+    mode = str(checkout_mode or "upi_qr").lower()
+    switch_label = "🔄 Switch to Payment Link" if mode == "upi_qr" else "🔄 Switch to UPI QR (30 min)"
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("⛔ Disable" if enabled else "✅ Enable", callback_data="a_pg_toggle_razorpay")],
+        [InlineKeyboardButton(switch_label, callback_data="a_pg_razorpay_mode")],
         [InlineKeyboardButton("🔑 Set / Replace Credentials", callback_data="a_pg_creds_razorpay")],
         [InlineKeyboardButton("🔐 Set Webhook Secret", callback_data="a_pg_webhook_secret")],
         [InlineKeyboardButton("🔗 Webhook Setup", callback_data="a_pg_webhook_setup")],
@@ -208,7 +217,7 @@ def _seller_webhook_guide_text() -> str:
         "3. Tap Add New Webhook.\n"
         "4. Copy the URL shown on the Webhook Setup page and paste it in Razorpay.\n"
         "5. Create a strong Webhook Secret.\n"
-        "6. Select payment.captured, order.paid and payment_link.paid.\n"
+        "6. Select payment.captured, order.paid, payment_link.paid and qr_code.credited.\n"
         "7. Save the webhook.\n"
         "8. Return to the Razorpay page in this bot.\n"
         "9. Tap Set Webhook Secret and paste the same secret.\n"
