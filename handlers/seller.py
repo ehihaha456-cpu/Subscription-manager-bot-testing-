@@ -34,7 +34,7 @@ from database.seller_subscriptions import (
     current_plan_text,
     effective_plan,
     seller_usage,
-    seller_active_subscriber_count,
+    clone_active_subscriber_count,
     get_config,
     plan_limit_warning,
     start_trial,
@@ -578,7 +578,7 @@ def selected_bot_markup(record):
         if username else InlineKeyboardButton("🛠 Open Admin Panel", callback_data=f"seller_open_admin_{bot_id}")
     )
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("👤 Seller Profile", callback_data=f"seller_selected_profile_{bot_id}")],
+        [InlineKeyboardButton("👤 Profile", callback_data=f"seller_selected_profile_{bot_id}")],
         [open_admin],
         [
             InlineKeyboardButton("⏸ Pause Bot" if active else "▶️ Resume Bot", callback_data=f"seller_{'pause' if active else 'resume'}_{bot_id}"),
@@ -661,9 +661,10 @@ async def selected_seller_profile_text(owner_id: int, record: dict, user) -> str
     joined = _aware_utc((seller or {}).get("created_at"))
     joined_text = joined.strftime("%d-%m-%Y") if joined else "-"
 
+    # Clone Bots is seller-level; the other three resource counts are
+    # strictly scoped to the clone whose profile is currently open.
     bots_used = await count_owner_bots(seller_account_id)
-    # Count active subscribers for this clone only, including Plan Group subscriptions.
-    active_subscribers = await seller_active_subscriber_count(scope_id)
+    active_subscribers = await clone_active_subscriber_count(scope_id)
     channels_used = await db["seller_channels"].count_documents({"owner_id": scope_id, "active": True})
     plans_used = await db["seller_plans"].count_documents({"owner_id": scope_id})
     total_users = await db["seller_users"].count_documents({"owner_id": scope_id})
@@ -696,7 +697,7 @@ async def selected_seller_profile_text(owner_id: int, record: dict, user) -> str
     bot_status = "🟢 Active" if record.get("active") else "🟡 Paused"
 
     return (
-        "👤 Seller Profile\n\n"
+        "👤 Profile\n\n"
         f"🆔 Seller ID: {owner_id}\n"
         f"👤 Name: {name}\n"
         f"📛 Username: {username}\n"
