@@ -34,6 +34,7 @@ from database.seller_subscriptions import (
     current_plan_text,
     effective_plan,
     seller_usage,
+    seller_active_subscriber_count,
     get_config,
     plan_limit_warning,
     start_trial,
@@ -661,9 +662,8 @@ async def selected_seller_profile_text(owner_id: int, record: dict, user) -> str
     joined_text = joined.strftime("%d-%m-%Y") if joined else "-"
 
     bots_used = await count_owner_bots(seller_account_id)
-    active_subscribers = await db["seller_subscriptions"].count_documents({
-        "owner_id": scope_id, "active": True, "expiry_date": {"$gt": now}
-    })
+    # Count active subscribers for this clone only, including Plan Group subscriptions.
+    active_subscribers = await seller_active_subscriber_count(scope_id)
     channels_used = await db["seller_channels"].count_documents({"owner_id": scope_id, "active": True})
     plans_used = await db["seller_plans"].count_documents({"owner_id": scope_id})
     total_users = await db["seller_users"].count_documents({"owner_id": scope_id})
