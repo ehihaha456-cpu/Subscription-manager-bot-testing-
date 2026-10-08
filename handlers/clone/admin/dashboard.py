@@ -1,6 +1,7 @@
 """Feature callback handler extracted from the legacy clone callback router."""
 
 from handlers.common.clone_context import *
+from database.seller_bots import count_owner_bots
 
 
 async def handle(self, update, context, q, owner, staff, a, role):
@@ -36,12 +37,13 @@ async def handle(self, update, context, q, owner, staff, a, role):
             except Exception:
                 return str(value)
         username_text = f'@{q.from_user.username}' if q.from_user.username else 'Not set'
+        total_clone_bots = await count_owner_bots(seller_account_id)
         text = f"👤 Seller Profile\n\n🆔 Seller ID: {seller_account_id}\n👤 Name: {q.from_user.full_name or 'Unknown'}\n📝 Username: {username_text}"
         referral_data = await seller_referral_stats(seller_account_id)
         main_bot_username = os.getenv('MAIN_BOT_USERNAME', 'Subscripti0n_Manage_bot').lstrip('@')
         referral_link = f'https://t.me/{main_bot_username}?start=refseller_{seller_account_id}'
 
-        text += f"\n\n💎 Plan Details\nPlan: {plan.get('name', 'Free')}\nStatus: {status}\nExpiry: {self.format_dt(expiry, timezone_name)}\nRemaining: {remaining_text}\n\n📊 Usage & Limits\n🤖 Clone Bots: {(1 if bot_record else 0)} / {lim(plan.get('bot_limit', 1))}\n👥 Active Subscribers: {usage.get('active', 0)} / {lim(plan.get('active_subscriber_limit', 25))}\n📢 Channels / Groups: {usage.get('channels', 0)} / {lim(plan.get('channel_limit', 1))}\n📦 Subscription Plans: {usage.get('plans', 0)} / {lim(plan.get('plan_limit', 2))}\n\n👥 Total Users: {usage.get('users', 0)}\n💳 Pending Payments: {usage.get('pending', 0)}\n💰 Revenue: {format_currency((await get_seller_settings(owner)).get('currency'), usage.get('revenue', 0))}"
+        text += f"\n\n💎 Plan Details\nPlan: {plan.get('name', 'Free')}\nStatus: {status}\nExpiry: {self.format_dt(expiry, timezone_name)}\nRemaining: {remaining_text}\n\n📊 Usage & Limits\n🤖 Clone Bots: {total_clone_bots} / {lim(plan.get('bot_limit', 1))}\n👥 Active Subscribers: {usage.get('active', 0)} / {lim(plan.get('active_subscriber_limit', 25))}\n📢 Channels / Groups: {usage.get('channels', 0)} / {lim(plan.get('channel_limit', 1))}\n📦 Subscription Plans: {usage.get('plans', 0)} / {lim(plan.get('plan_limit', 2))}\n\n👥 Total Users: {usage.get('users', 0)}\n💳 Pending Payments: {usage.get('pending', 0)}\n💰 Revenue: {format_currency((await get_seller_settings(owner)).get('currency'), usage.get('revenue', 0))}"
         text += (
             f"\n\n🤝 Seller Referral Program"
             f"\n\n👥 Sellers Joined: {referral_data.get('total', 0)}"
